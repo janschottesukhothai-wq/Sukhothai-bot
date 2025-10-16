@@ -4,19 +4,18 @@ import cors from "cors";
 import bodyParser from "body-parser";
 import crypto from "crypto";
 import { OpenAI } from "openai";
-import fs from "fs";
 import { loadStore, topK } from "./vectorStore.js";
 import { makeTransporter, sendTranscript } from "./mailer.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const ORIGIN = process.env.ALLOWED_ORIGIN || "*";
-
 app.use(cors({ origin: ORIGIN === "*" ? true : [ORIGIN] }));
 app.use(bodyParser.json({ limit: "4mb" }));
 app.use("/public", express.static("public"));
+
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const BOT_CONFIG = {
   name: "Sukhothai Assist",
@@ -48,13 +47,6 @@ function systemPrompt() {
   ].join("\n");
 }
 
-function contextFromRag(query, k=6) {
-  const store = loadStore();
-  if (!store.items.length) return "Keine RAG-Daten vorhanden.";
-  // Embed query to vector for similarity search
-  return { store, k };
-}
-
 async function embedText(text) {
   const res = await openai.embeddings.create({
     model: "text-embedding-3-small",
@@ -63,12 +55,12 @@ async function embedText(text) {
   return res.data[0].embedding;
 }
 
-async function retrieveContext(query, k=6) {
+async function retrieveContext(query, k = 6) {
   const store = loadStore();
-  if (!store.items.length) return "";
+  if (!store.items || !store.items.length) return "";
   const qvec = await embedText(query);
   const hits = topK(store, qvec, k);
-  const blocks = hits.map(h => `# Quelle: ${h.meta.source}\n${h.text}`);
+  const blocks = hits.map(h => `# Quelle: ${h.meta?.source || "unbekannt"}\n${h.text}`);
   return blocks.join("\n\n");
 }
 
@@ -78,7 +70,6 @@ async function llmAnswer({ userMsg, history, context }) {
     ...history,
     { role: "user", content: userMsg }
   ];
-  // Use Responses API compatible Chat
   const chat = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     messages,
@@ -87,7 +78,7 @@ async function llmAnswer({ userMsg, history, context }) {
   return chat.choices[0].message.content;
 }
 
-function sanitizeHistory(history=[]) {
+function sanitizeHistory(history = []) {
   return history
     .filter(h => h && h.role && h.content)
     .map(h => ({ role: h.role, content: String(h.content).slice(0, 6000) }))
@@ -97,24 +88,22 @@ function sanitizeHistory(history=[]) {
 const transporter = makeTransporter({
   host: process.env.SMTP_HOST,
   user: process.env.SMTP_USER,
-  return res.status(400).json({ ok: false, error: "Felder fehlen" });
-    }: process.env.SMTP_PASS
+  pass: process.env.SMTP_PASS
 });
 
-async function mailChat(threadId, historyPlusAnswer) {
-  const subject = `[Sukhothai Bot] Chat #${threadId}`; // fixed
-}
-
+// ---- Chat Endpoint ---------------------------------------------------------
 app.post("/chat", async (req, res) => {
   try {
     const { message, history = [] } = req.body || {};
+    if (!message || typeof message !== "string") {
+      return res.status(400).json({ ok: false, error: "message fehlt" });
+    }
     const threadId = crypto.randomBytes(4).toString("hex");
     const cleanHistory = sanitizeHistory(history);
-
     const context = await retrieveContext(message, 6);
     const answer = await llmAnswer({ userMsg: message, history: cleanHistory, context });
 
-    // Email transcript
+    // Transcript mailen (best effort)
     try {
       const subject = `[Sukhothai Bot] Chat #${threadId}`;
       const lines = [...cleanHistory, { role: "user", content: message }, { role: "assistant", content: answer }]
@@ -126,18 +115,18 @@ app.post("/chat", async (req, res) => {
         subject,
         text: lines
       });
-    } catch (e) {
-      console.error("Mailfehler:", e.message);
+    } catch (err) {
+      console.error("Mailfehler:", err?.message);
     }
 
-    res.json({ ok: true, answer, threadId });
+    return res.json({ ok: true, answer, threadId });
   } catch (e) {
     console.error(e);
-    res.status(500).json({ ok: false, error: "Chat fehlgeschlagen" });
+    return res.status(500).json({ ok: false, error: "Chat fehlgeschlagen" });
   }
 });
 
-// Reservierungs-Endpoint: validiert und sendet per E-Mail
+// ---- Reservierungs-Endpoint -----------------------------------------------
 app.post("/reserve", async (req, res) => {
   try {
     const { name, phone, persons, date, time, note } = req.body || {};
@@ -154,6 +143,7 @@ app.post("/reserve", async (req, res) => {
       `Uhrzeit: ${time}`,
       `Notiz: ${note || "-"}`
     ].join("\n");
+
     try {
       await sendTranscript(transporter, {
         from: process.env.EMAIL_FROM,
@@ -161,16 +151,19 @@ app.post("/reserve", async (req, res) => {
         subject,
         text
       });
-    } catch (e) {
-      console.error("Mailfehler Reserve:", e.message);
+    } catch (err) {
+      console.error("Mailfehler Reserve:", err?.message);
     }
     return res.json({ ok: true, msg: "Erfasst. Wir melden uns." });
   } catch (e) {
     console.error(e);
-    res.status(500).json({ ok: false, error: "Reservierung fehlgeschlagen" });
+    return res.status(500).json({ ok: false, error: "Reservierung fehlgeschlagen" });
   }
 });
 
+app.get("/", (_req, res) => {
+  res.type("text/plain").send("Sukhothai Assist: OK");
+});
 
 app.listen(PORT, () => {
   console.log(`Sukhothai Assist läuft auf :${PORT}`);
