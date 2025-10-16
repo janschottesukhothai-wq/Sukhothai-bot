@@ -1,0 +1,19 @@
+{
+  "name": "sukhothai-assistbot",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node server.js",
+    "ingest": "node ingest.js",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "body-parser": "^1.20.2",
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "marked": "^12.0.2",
+    "node-fetch": "^3.3.2",
+    "nodemailer": "^6.9.14",
+    "openai": "^4.57.0"
+  }
+}

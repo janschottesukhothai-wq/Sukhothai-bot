@@ -1,0 +1,177 @@
+import "dotenv/config";
+import express from "express";
+import cors from "cors";
+import bodyParser from "body-parser";
+import crypto from "crypto";
+import { OpenAI } from "openai";
+import fs from "fs";
+import { loadStore, topK } from "./vectorStore.js";
+import { makeTransporter, sendTranscript } from "./mailer.js";
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+const ORIGIN = process.env.ALLOWED_ORIGIN || "*";
+
+app.use(cors({ origin: ORIGIN === "*" ? true : [ORIGIN] }));
+app.use(bodyParser.json({ limit: "4mb" }));
+app.use("/public", express.static("public"));
+
+const BOT_CONFIG = {
+  name: "Sukhothai Assist",
+  style: "klar, freundlich, keine Floskeln, kein Gendern",
+  openingHours: {
+    mon: "17:30-23:00",
+    tue: "17:30-23:00",
+    wed: "17:30-23:00",
+    thu: "17:30-23:00",
+    fri: "17:30-23:00",
+    sat: "17:30-23:00",
+    sun: "12:00-14:30, 17:30-23:00"
+  },
+  bookingPolicy: "Reservierungen werden nicht final bestätigt. Kontaktdaten aufnehmen und per Mail senden.",
+  address: "Bochumer Straße 15, 45549 Sprockhövel"
+};
+
+function systemPrompt() {
+  return [
+    `Du bist der Live-Agent für das Thai-Restaurant "Sukhothai".`,
+    `Sprache: Deutsch. Stil: ${BOT_CONFIG.style}.`,
+    `Regeln:`,
+    `- Keine Zusagen, die du nicht sicher weißt.`,
+    `- Wenn unklar: Rückfragen stellen.`,
+    `- Reservierungen nie final bestätigen. Immer Kontaktdaten aufnehmen.`,
+    `Öffnungszeiten: ${JSON.stringify(BOT_CONFIG.openingHours)}`,
+    `Adresse: ${BOT_CONFIG.address}`,
+    `Wenn möglich, kurze klare Sätze. Keine Füllwörter.`
+  ].join("\n");
+}
+
+function contextFromRag(query, k=6) {
+  const store = loadStore();
+  if (!store.items.length) return "Keine RAG-Daten vorhanden.";
+  // Embed query to vector for similarity search
+  return { store, k };
+}
+
+async function embedText(text) {
+  const res = await openai.embeddings.create({
+    model: "text-embedding-3-small",
+    input: text
+  });
+  return res.data[0].embedding;
+}
+
+async function retrieveContext(query, k=6) {
+  const store = loadStore();
+  if (!store.items.length) return "";
+  const qvec = await embedText(query);
+  const hits = topK(store, qvec, k);
+  const blocks = hits.map(h => `# Quelle: ${h.meta.source}\n${h.text}`);
+  return blocks.join("\n\n");
+}
+
+async function llmAnswer({ userMsg, history, context }) {
+  const messages = [
+    { role: "system", content: systemPrompt() + (context ? `\n\nKontext:\n${context}` : "") },
+    ...history,
+    { role: "user", content: userMsg }
+  ];
+  // Use Responses API compatible Chat
+  const chat = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages,
+    temperature: 0.2
+  });
+  return chat.choices[0].message.content;
+}
+
+function sanitizeHistory(history=[]) {
+  return history
+    .filter(h => h && h.role && h.content)
+    .map(h => ({ role: h.role, content: String(h.content).slice(0, 6000) }))
+    .slice(-20);
+}
+
+const transporter = makeTransporter({
+  host: process.env.SMTP_HOST,
+  user: process.env.SMTP_USER,
+  return res.status(400).json({ ok: false, error: "Felder fehlen" });
+    }: process.env.SMTP_PASS
+});
+
+async function mailChat(threadId, historyPlusAnswer) {
+  const subject = `[Sukhothai Bot] Chat #${threadId}`; // fixed
+}
+
+app.post("/chat", async (req, res) => {
+  try {
+    const { message, history = [] } = req.body || {};
+    const threadId = crypto.randomBytes(4).toString("hex");
+    const cleanHistory = sanitizeHistory(history);
+
+    const context = await retrieveContext(message, 6);
+    const answer = await llmAnswer({ userMsg: message, history: cleanHistory, context });
+
+    // Email transcript
+    try {
+      const subject = `[Sukhothai Bot] Chat #${threadId}`;
+      const lines = [...cleanHistory, { role: "user", content: message }, { role: "assistant", content: answer }]
+        .map(m => `${m.role.toUpperCase()}: ${m.content}`)
+        .join("\n\n");
+      await sendTranscript(transporter, {
+        from: process.env.EMAIL_FROM,
+        to: process.env.EMAIL_TO,
+        subject,
+        text: lines
+      });
+    } catch (e) {
+      console.error("Mailfehler:", e.message);
+    }
+
+    res.json({ ok: true, answer, threadId });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "Chat fehlgeschlagen" });
+  }
+});
+
+// Reservierungs-Endpoint: validiert und sendet per E-Mail
+app.post("/reserve", async (req, res) => {
+  try {
+    const { name, phone, persons, date, time, note } = req.body || {};
+    if (!name || !phone || !persons || !date || !time) {
+      return res.status(400).json({ ok: false, error: "Felder fehlen" });
+    }
+    const subject = `[Sukhothai Reservierung] ${date} ${time} – ${persons} Pers.`;
+    const text = [
+      `Neue Reservierungsanfrage:`,
+      `Name: ${name}`,
+      `Telefon: ${phone}`,
+      `Personen: ${persons}`,
+      `Datum: ${date}`,
+      `Uhrzeit: ${time}`,
+      `Notiz: ${note || "-"}`
+    ].join("\n");
+    try {
+      await sendTranscript(transporter, {
+        from: process.env.EMAIL_FROM,
+        to: process.env.EMAIL_TO,
+        subject,
+        text
+      });
+    } catch (e) {
+      console.error("Mailfehler Reserve:", e.message);
+    }
+    return res.json({ ok: true, msg: "Erfasst. Wir melden uns." });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: "Reservierung fehlgeschlagen" });
+  }
+});
+
+
+app.listen(PORT, () => {
+  console.log(`Sukhothai Assist läuft auf :${PORT}`);
+});
