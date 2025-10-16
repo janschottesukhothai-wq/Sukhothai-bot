@@ -1,184 +1,224 @@
 (() => {
-  // ---- Einstellungen ----
-  const API = window.SUKH_TALK_API || "/chat"; // Server-Endpunkt
+  // ==== Konfiguration aus window ====
+  const API = window.SUKH_TALK_API || "/chat";
+  const BOTTOM_OFFSET =
+    Number(window.SUKH_TALK_BOTTOM_OFFSET || 0); // px extra Abstand (z.B. Sticky-CTA)
 
-  // ---- Styles ----
-  const css = `
-  #sb-wrap{
-    position:fixed; left:18px; top:50%;
-    transform:translateY(-50%);
-    z-index:2147483647;
-    font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif !important;
-  }
-  #sb-open{
-    border:none !important; border-radius:9999px !important;
-    width:56px !important; height:56px !important;
-    background:#000 !important; color:#fff !important;
-    box-shadow:0 6px 24px rgba(0,0,0,.2) !important;
-    cursor:pointer !important; font-weight:700 !important;
-  }
-  #sb-panel{
-    display:none !important;               /* Start: VERSTECKT */
-    width:min(360px, calc(100vw - 32px)) !important;
-    height:min(560px, calc(100vh - 120px)) !important;
-    margin-top:12px !important;
-    background:#fff !important; color:#111 !important;
-    border-radius:16px !important;
-    box-shadow:0 16px 48px rgba(0,0,0,.28) !important;
-    overflow:hidden !important;
-    /* WICHTIG: hier KEIN display:flex !important setzen */
-  }
-  #sb-panel.sb-flex{                       /* sichtbar als Flex-Container */
-    display:flex !important; flex-direction:column !important; box-sizing:border-box !important;
-  }
-  #sb-head{
-    background:#000 !important; color:#fff !important;
-    padding:12px 14px !important; font-weight:700 !important;
-    display:flex !important; align-items:center !important; justify-content:space-between !important;
-  }
-  #sb-close{
-    background:transparent !important; border:none !important;
-    color:#fff !important; font-size:20px !important; line-height:1 !important;
-    cursor:pointer !important; padding:0 6px !important;
-  }
-  #sb-log{
-    flex:1 1 auto !important; overflow:auto !important; padding:12px !important;
-    background:#fff !important; color:#111 !important;
-    font-size:14px !important; line-height:1.45 !important;
-  }
-  #sb-log .msg{ margin:8px 0 !important; }
-  #sb-log .who{ font-weight:700 !important; margin-bottom:2px !important; }
-  #sb-log .text{ white-space:pre-wrap !important; }
-  #sb-inp{
-    display:flex !important; gap:8px !important; border-top:1px solid #eee !important;
-    padding:10px !important; background:#fff !important; box-sizing:border-box !important;
-  }
-  #sb-input{
-    flex:1 1 auto !important; min-width:0 !important;
-    border:1px solid #ddd !important; border-radius:10px !important;
-    padding:10px 12px !important; outline:none !important;
-    background:#fff !important; color:#111 !important;
-  }
-  #sb-input::placeholder{ color:#777 !important; }
-  #sb-send{
-    flex:0 0 auto !important; border:none !important; border-radius:10px !important;
-    padding:10px 16px !important; background:#000 !important; color:#fff !important;
-    font-weight:600 !important; cursor:pointer !important;
-  }
-  #sb-send[disabled]{ opacity:.6 !important; cursor:default !important; }
-
-  /* Click-Outside Overlay */
-  #sb-overlay{
-    position:fixed; inset:0; background:transparent; z-index:2147483646; display:none;
-  }
-  #sb-overlay.show{ display:block; }
-  @media (max-width:480px){
-    #sb-panel{ width:calc(100vw - 32px) !important; height:min(70vh, calc(100vh - 140px)) !important; }
-  }`;
+  // ==== Styles (responsiv + Safe-Area) ====
   const style = document.createElement("style");
-  style.textContent = css;
+  style.textContent = `
+:root{
+  --sb-safe-bottom: env(safe-area-inset-bottom, 0px);
+  --sb-bottom-offset: ${BOTTOM_OFFSET}px;
+}
+
+/* Container */
+#sb-wrap{
+  position: fixed;
+  inset: 0 auto auto 16px; /* links unten standard */
+  z-index: 2147483000;
+  pointer-events: none; /* nur Child-Elemente klickbar machen */
+}
+
+/* Chat-Bubble */
+#sb-bubble{
+  pointer-events: auto;
+  position: fixed;
+  left: 16px;
+  bottom: calc(16px + var(--sb-safe-bottom) + var(--sb-bottom-offset));
+  width: 54px; height: 54px;
+  border-radius: 9999px;
+  background:#000; color:#fff;
+  display:flex; align-items:center; justify-content:center;
+  font: 600 14px/1 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  box-shadow: 0 6px 24px rgba(0,0,0,.22);
+  cursor: pointer;
+}
+
+/* Links-Mitte (nur Desktop) */
+@media (min-width: 641px){
+  #sb-bubble{
+    top: 50%; bottom: auto; transform: translateY(-50%);
+  }
+}
+
+/* Panel (Sheet) */
+#sb-panel{
+  pointer-events: auto;
+  position: fixed;
+  display: none; /* per JS togglen */
+  left: 16px;
+  bottom: calc(16px + var(--sb-safe-bottom) + var(--sb-bottom-offset));
+  width: min(420px, 92vw);
+  max-width: 420px;
+  background: #fff;
+  border-radius: 16px;
+  box-shadow: 0 18px 48px rgba(0,0,0,.28);
+  overflow: hidden;
+  box-sizing: border-box;
+  display: flex; flex-direction: column;
+  max-height: min(80vh, 680px);
+}
+
+/* Desktop: vertikal mittig links */
+@media (min-width: 641px){
+  #sb-panel{
+    top: 50%;
+    transform: translateY(-50%);
+    bottom: auto;
+  }
+}
+
+/* Kopf */
+#sb-head{
+  height: 48px; min-height: 48px;
+  background:#000; color:#fff;
+  display:flex; align-items:center; justify-content:space-between;
+  padding: 0 14px;
+  font: 600 16px/1 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+}
+#sb-close{
+  appearance: none; border: 0; background: transparent;
+  color:#fff; font-size: 20px; cursor:pointer; line-height: 1;
+}
+
+/* Log + Input über Flex */
+#sb-body{ flex: 1; min-height: 0; display:flex; flex-direction: column; }
+#sb-log{
+  flex: 1; min-height: 0;
+  overflow: auto;
+  padding: 12px 12px 6px;
+  font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  color:#111;
+}
+.sb-msg{ margin: 8px 0; }
+.sb-msg .sb-role{ font-weight: 600; margin-bottom: 2px; }
+
+/* Input-Zeile */
+#sb-inp{
+  display:flex; gap: 8px;
+  padding: 10px 12px calc(10px + var(--sb-safe-bottom));
+  border-top: 1px solid #eee;
+  background:#fff;
+}
+#sb-input{
+  flex:1;
+  padding: 10px 12px;
+  border: 1px solid #ddd;
+  border-radius: 10px;
+  outline: none;
+  font: 14px/1.3 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+}
+#sb-send{
+  border: none; border-radius: 10px;
+  padding: 0 14px; min-width: 96px; height: 40px;
+  background:#000; color:#fff; cursor:pointer;
+  font: 600 14px/1 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+}
+
+/* Kleinere Bildschirme: Buttons etwas größer */
+@media (max-width: 360px){
+  #sb-send{ min-width: 88px; }
+}
+
+/* Öffnen-Animation */
+.sb-open{ animation: sbFade .14s ease-out; }
+@keyframes sbFade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+`;
   document.head.appendChild(style);
 
-  // ---- Markup ----
+  // ==== Markup ====
   const wrap = document.createElement("div");
   wrap.id = "sb-wrap";
   wrap.innerHTML = `
-    <button id="sb-open" aria-expanded="false" aria-controls="sb-panel" title="Chat öffnen">Chat</button>
-    <div id="sb-panel" role="dialog" aria-label="Sukhothai Assist">
+    <button id="sb-bubble" aria-label="Chat öffnen">Chat</button>
+    <div id="sb-panel" role="dialog" aria-modal="true" aria-label="Sukhothai Assist">
       <div id="sb-head">
-        <span>Sukhothai Assist</span>
-        <button id="sb-close" aria-label="Schließen" title="Schließen">×</button>
+        <div>Sukhothai Assist</div>
+        <button id="sb-close" aria-label="Chat schließen">×</button>
       </div>
-      <div id="sb-log"></div>
-      <div id="sb-inp">
-        <input id="sb-input" type="text" placeholder="Frage stellen…" />
-        <button id="sb-send">Senden</button>
+      <div id="sb-body">
+        <div id="sb-log" aria-live="polite" aria-atomic="false"></div>
+        <div id="sb-inp">
+          <input id="sb-input" placeholder="Frage stellen…" autocomplete="off" />
+          <button id="sb-send">Senden</button>
+        </div>
       </div>
     </div>
   `;
   document.body.appendChild(wrap);
 
-  // Click-Outside Overlay
-  const overlay = document.createElement("div");
-  overlay.id = "sb-overlay";
-  document.body.appendChild(overlay);
+  // ==== Refs ====
+  const bubble = wrap.querySelector("#sb-bubble");
+  const panel  = wrap.querySelector("#sb-panel");
+  const close  = wrap.querySelector("#sb-close");
+  const log    = wrap.querySelector("#sb-log");
+  const input  = wrap.querySelector("#sb-input");
+  const send   = wrap.querySelector("#sb-send");
 
-  // ---- Logic ----
-  const openBtn = wrap.querySelector("#sb-open");
-  const closeBtn = wrap.querySelector("#sb-close");
-  const panel   = wrap.querySelector("#sb-panel");
-  const log     = wrap.querySelector("#sb-log");
-  const input   = wrap.querySelector("#sb-input");
-  const send    = wrap.querySelector("#sb-send");
   const history = [];
 
-  function add(role, text){
-    const row = document.createElement("div");
-    row.className = "msg";
-    const who = document.createElement("div");
-    who.className = "who";
-    who.textContent = role === "user" ? "Du" : "Sukhothai";
-    const body = document.createElement("div");
-    body.className = "text";
-    body.textContent = String(text || "");
-    row.appendChild(who); row.appendChild(body);
-    log.appendChild(row);
-    log.scrollTop = log.scrollHeight;
+  // ==== Helpers ====
+  function add(role, text) {
+    const el = document.createElement("div");
+    el.className = "sb-msg";
+    el.innerHTML = `
+      <div class="sb-role">${role === "user" ? "Du" : "Sukhothai"}</div>
+      <div class="sb-text">${(text || "").replace(/\n/g, "<br>")}</div>
+    `;
+    log.appendChild(el);
+    // Scroll ans Ende – mit kleinem Delay, falls Fonts/Layout noch laden
+    setTimeout(() => { log.scrollTop = log.scrollHeight; }, 0);
   }
 
   function openPanel() {
-    if (!panel.classList.contains("sb-flex")) {
-      panel.classList.add("sb-flex");                  // sichtbar machen
-      openBtn.setAttribute("aria-expanded","true");
-      overlay.classList.add("show");
-      setTimeout(() => { try{ input.focus(); }catch{} }, 10);
-    }
+    panel.style.display = "flex";
+    panel.classList.add("sb-open");
+    // Fokus in Input
+    setTimeout(() => input.focus(), 30);
   }
   function closePanel() {
-    if (panel.classList.contains("sb-flex")) {
-      panel.classList.remove("sb-flex");               // wieder verstecken
-      openBtn.setAttribute("aria-expanded","false");
-      overlay.classList.remove("show");
-    }
+    panel.style.display = "none";
   }
 
-  const openOnce = (ev) => { ev.preventDefault && ev.preventDefault(); openPanel(); };
-  openBtn.addEventListener("click", openOnce, { passive:false });
-  openBtn.addEventListener("touchend", openOnce, { passive:false });
-  openBtn.addEventListener("pointerup", openOnce, { passive:false });
-  closeBtn.addEventListener("click", closePanel);
-  overlay.addEventListener("click", closePanel);
-  document.addEventListener("keydown", e => { if (e.key === "Escape") closePanel(); });
+  // ==== Events ====
+  bubble.addEventListener("click", openPanel);
+  close.addEventListener("click", closePanel);
 
-  async function sendMsg(){
+  async function sendMsg() {
     const msg = (input.value || "").trim();
-    if (!msg || send.disabled) return;
+    if (!msg) return;
     add("user", msg);
     input.value = "";
-    send.disabled = true;
-
-    try{
+    try {
       const res = await fetch(API, {
         method: "POST",
-        headers: { "Content-Type":"application/json" },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: msg, history })
       });
-
       if (!res.ok) {
         add("assistant", `Server-Fehler (${res.status})`);
-      } else {
-        const data = await res.json();
-        add("assistant", data.answer || data.error || "Entschuldige, es gab ein Problem.");
-        history.push({ role:"user", content: msg });
-        history.push({ role:"assistant", content: data.answer || data.error || "" });
+        return;
       }
+      const data = await res.json();
+      add("assistant", data.answer || data.error || "Entschuldige, es gab ein Problem.");
+      history.push(
+        { role: "user", content: msg },
+        { role: "assistant", content: data.answer || data.error || "" }
+      );
     } catch (e) {
       add("assistant", "Netzwerkfehler oder API nicht erreichbar.");
       console.error("Chat Fehler:", e);
-    } finally {
-      send.disabled = false;
     }
   }
+
   send.addEventListener("click", sendMsg);
   input.addEventListener("keydown", e => { if (e.key === "Enter") sendMsg(); });
+
+  // ==== Resize: bei Änderung der Safe-Area (iOS) unten korrekt bleiben ====
+  const onResize = () => {
+    // Nichts nötig – CSS nutzt env(safe-area-inset-bottom) + var(--sb-bottom-offset)
+    // Falls du dynamisch umstellen willst, könntest du hier panel.style.bottom neu setzen.
+  };
+  window.addEventListener("resize", onResize);
 })();
