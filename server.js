@@ -5,21 +5,23 @@ import cors from "cors";
 import bodyParser from "body-parser";
 import crypto from "crypto";
 import { OpenAI } from "openai";
-// Retrieval bewusst deaktiviert (für Speed). Später optional einschalten.
+// Retrieval ist für maximale Geschwindigkeit deaktiviert.
 // import { loadStore, topK } from "./vectorStore.js";
 import { makeTransporter, sendTranscript } from "./mailer.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-console.log("🚀 Build gestartet – Fast Mode mit FAQ-Layer");
+console.log("🚀 Build gestartet – Fast Mode + FAQ-Layer");
 
 // =============================
 // Tuning
 // =============================
-const ENABLE_RETRIEVAL = false;      // für maximale Geschwindigkeit AUS
-const MAX_COMPLETION_TOKENS = 250;   // kürzere Antworten = schneller
-const MAX_TURNS = 10;                // nur letzte 10 Chat-Turns (user+assistant)
+const ENABLE_RETRIEVAL = false;       // später bei Bedarf aktivieren
+const MAX_COMPLETION_TOKENS = 220;    // kurze Antworten -> schneller/konstanter
+const MAX_TURNS = 10;                  // nur letzte 10 user/assistant-Turns
+const LLM_TIMEOUT_MS = 12000;          // 12s Timeout
+const LLM_RETRIES = 3;                 // Retries bei 429/5xx/Timeout
 
 // =============================
 // CORS (mehrere Origins erlaubt)
@@ -32,7 +34,7 @@ const ORIGINS = (process.env.ALLOWED_ORIGIN || "*")
 app.use(
   cors({
     origin: (origin, cb) => {
-      if (!origin) return cb(null, true); // z. B. curl/SSR
+      if (!origin) return cb(null, true);
       if (ORIGINS.includes("*") || ORIGINS.includes(origin)) return cb(null, true);
       return cb(new Error(`CORS blocked: ${origin}`));
     },
@@ -95,19 +97,25 @@ function systemPrompt() {
 const FAQ = [
   // Reservations & Bookings
   {
-    id: "cancel-policy",
-    patterns: [/cancel|storn|absag/i],
+    id: "reserve-how",
+    patterns: [/reservier|tisch.*reservier|how.*reserv|book.*table|wie.*buch/i],
     answer:
-      "Stornierungen sind bis 1 Stunde vor Öffnung möglich. Für Gruppen ab 10 Personen fällt bei Nichterscheinen oder Reduzierung €10 pro Person an."
+      "Du kannst direkt über den Button »Tisch reservieren« auf unserer Website buchen oder telefonisch. Hinweis: Telefonische Reservierungen erhalten keine E-Mail-Bestätigung; auf Wunsch senden wir eine WhatsApp-Bestätigung."
+  },
+  {
+    id: "cancel-policy",
+    patterns: [/cancel|storn|absag|no\s*show/i],
+    answer:
+      "Stornierungen sind bis 1 Stunde vor Öffnung möglich. Für Gruppen ab 10 Personen fällt bei Nichterscheinen oder Reduzierung € 10 pro Person an."
   },
   {
     id: "walk-in",
-    patterns: [/walk.?in|spontan|ohne reserv|vorbei kommen|einfach kommen/i],
+    patterns: [/walk.?in|spontan|ohne reserv|einfach kommen/i],
     answer: "Für Walk-ins halten wir keine Tische frei."
   },
   {
     id: "deposit",
-    patterns: [/anzahl|deposit|kaution|kreditkarte|sicherheitsleistung/i],
+    patterns: [/anzahl|deposit|kaution|kreditkarte|sicherungs?leistung/i],
     answer:
       "Nur für Gruppen ab 10 Personen benötigen wir eine Kreditkarten-Sicherung."
   },
@@ -117,19 +125,19 @@ const FAQ = [
     id: "menu-general",
     patterns: [/menü|karte|speisekarte|gerichte|essen/i],
     answer:
-      "Ich habe keinen Einblick in die tagesaktuelle Karte. Gern der Online-Menülink: https://www.sukhothai-sprockhoevel.de/karte/"
+      "Ich habe keinen Einblick in die tagesaktuelle Karte. Hier ist der Online-Menülink: https://www.sukhothai-sprockhoevel.de/karte/"
   },
   {
     id: "dietary",
     patterns: [/vegan|vegetar|gluten|halal|laktos|allerg/i],
     answer:
-      "Vegetarische, vegane und glutenfreie Optionen sind verfügbar. Hier ist die Karte: https://www.sukhothai-sprockhoevel.de/karte/"
+      "Vegetarische, vegane und glutenfreie Optionen sind verfügbar. Karte: https://www.sukhothai-sprockhoevel.de/karte/"
   },
   {
     id: "kids",
     patterns: [/kinder|kindermen|kids/i],
     answer:
-      "Ja, es gibt Kindermenüs: vegane Nuggets mit Pommes, vegane Bratnudeln mit Gemüse, Pommes mit Ketchup sowie kleine Ente süß-sauer mit Reis."
+      "Ja, Kindergerichte: vegane Nuggets mit Pommes, vegane Bratnudeln mit Gemüse, Pommes mit Ketchup sowie kleine Süß-Sauer-Ente mit Reis."
   },
   {
     id: "bring-own",
@@ -147,9 +155,9 @@ const FAQ = [
   // Location & Accessibility
   {
     id: "maps",
-    patterns: [/wo seid|adresse|wie (komm|finde)|navigat|karte google/i],
+    patterns: [/wo seid|adresse|wie (komm|finde)|navigat|google.*maps/i],
     answer:
-      "Hier ist der Google-Maps-Link: https://maps.app.goo.gl/AnSHY9QvbdWJpZYeA"
+      "Adresse: Bochumer Straße 15, 45549 Sprockhövel. Google-Maps: https://maps.app.goo.gl/AnSHY9QvbdWJpZYeA"
   },
   {
     id: "parking",
@@ -165,7 +173,7 @@ const FAQ = [
   },
   {
     id: "public-transport",
-    patterns: [/bus|bahn|öffentliche(n)? verkehr|ÖPNV|zug/i],
+    patterns: [/bus|bahn|öffentliche(n)?\s*verkehr|öpnv|zug/i],
     answer:
       "Ja, der Sprockhövel Busbahnhof ist in der Nähe."
   },
@@ -181,7 +189,7 @@ const FAQ = [
     id: "giftcards",
     patterns: [/gutschein|gift ?card/i],
     answer:
-      "Ja, Gutscheine gibt es vor Ort oder online. Link: https://www.yovite.com/Restaurant-Gutschein-R-84849891.html?REF=REST"
+      "Ja, Gutscheine gibt es vor Ort oder online: https://www.yovite.com/Restaurant-Gutschein-R-84849891.html?REF=REST"
   },
   {
     id: "amenities",
@@ -191,7 +199,7 @@ const FAQ = [
   },
   {
     id: "contact",
-    patterns: [/kontakt|erreichen|frage(n)? stellen|email|mail/i],
+    patterns: [/kontakt|erreichen|frage(n)?\s*stellen|email|mail/i],
     answer:
       "Am besten per E-Mail an info@sukhothai-sprockhoevel.de."
   },
@@ -199,7 +207,7 @@ const FAQ = [
     id: "email-confirm",
     patterns: [/bestätig.*(mail|e-?mail)|reservierungsbestät/i],
     answer:
-      "Eine E-Mail-Bestätigung gibt es nur bei Online-Reservierung. Am Telefon senden wir die Bestätigung per WhatsApp."
+      "Eine E-Mail-Bestätigung gibt es nur bei Online-Reservierungen. Am Telefon senden wir die Bestätigung per WhatsApp."
   },
   {
     id: "catering",
@@ -215,7 +223,7 @@ const FAQ = [
   },
   {
     id: "payments",
-    patterns: [/karte|kreditkarte|ec|mastercard|visa|apple|google pay|paypal/i],
+    patterns: [/karte|kreditkarte|ec|mastercard|visa|apple\s*pay|google\s*pay|paypal/i],
     answer:
       "Wir akzeptieren EC, Visa, American Express, Mastercard, Apple Pay, Google Pay & PayPal."
   },
@@ -223,7 +231,7 @@ const FAQ = [
     id: "ev-charging",
     patterns: [/lade(gerät|station)|elektro(auto|fahrzeug)/i],
     answer:
-      "Ladestationen sind derzeit nicht verfügbar."
+      "Aktuell keine E-Ladestation verfügbar."
   },
   {
     id: "cooking-class",
@@ -239,9 +247,9 @@ const FAQ = [
   },
   {
     id: "takeaway",
-    patterns: [/take.?away|mitnehmen|to go|abholen|online bestell/i],
+    patterns: [/take.?away|mitnehmen|to\s*go|abholen|online\s*bestell/i],
     answer:
-      "Ja, alle Gerichte gibt es auch zum Mitnehmen (ökologisch verpackt). Online-Bestellung zu bestimmten Zeiten, telefonische Bestellungen während der Öffnungszeiten. Soll ich dich verbinden?"
+      "Ja, alle Gerichte gibt’s auch zum Mitnehmen (ökologisch verpackt). Online-Bestellungen zu bestimmten Zeiten, telefonisch während der Öffnungszeiten. Soll ich dich verbinden?"
   },
   {
     id: "wifi",
@@ -272,8 +280,7 @@ const FAQ = [
 function matchFAQ(userText) {
   if (!userText) return null;
   for (const item of FAQ) {
-    const hit = item.patterns.some(rx => rx.test(userText));
-    if (hit) {
+    if (item.patterns.some(rx => rx.test(userText))) {
       return typeof item.answer === "function" ? item.answer(userText) : item.answer;
     }
   }
@@ -310,55 +317,74 @@ async function retrieveContext(query, k = 3) {
 function sanitizeHistory(history = []) {
   return history
     .filter(h => h && h.role && h.content)
-    .map(h => ({
-      role: h.role,
-      content: String(h.content).slice(0, 1200)
-    }))
+    .map(h => ({ role: h.role, content: String(h.content).slice(0, 1200) }))
     .slice(-MAX_TURNS * 2);
 }
 
 // =============================
-// LLM mit Fallback
+// LLM mit Timeout + Retries + Fallback
 // =============================
 async function llmAnswer({ userMsg, history, context }) {
   const messages = [
     {
       role: "system",
-      content: systemPrompt() + (context ? `\n\nKontext:\n${context}` : ""),
+      content:
+        systemPrompt() +
+        (context ? `\n\nKontext:\n${context}` : "") +
+        "\nAntworte kurz und präzise (1–4 Sätze).",
     },
     ...history,
     { role: "user", content: userMsg },
   ];
 
-  async function callModel(model) {
-    const resp = await openai.chat.completions.create({
-      model,
-      messages,
-      max_completion_tokens: MAX_COMPLETION_TOKENS,
-    });
-    return resp.choices[0].message.content;
+  async function callModel(model, signal) {
+    const resp = await openai.chat.completions.create(
+      {
+        model,
+        messages,
+        max_completion_tokens: MAX_COMPLETION_TOKENS, // gpt-5-mini verlangt dieses Feld
+      },
+      { signal }
+    );
+    return resp.choices?.[0]?.message?.content?.trim() || "Okay.";
   }
 
   const primary = "gpt-5-mini";
   const fallback = "gpt-4o-mini";
 
-  try {
-    return await callModel(primary);
-  } catch (e1) {
-    const msg1 = e1?.response?.data?.error?.message || e1?.message || String(e1);
-    console.warn(`LLM PRIMARY (${primary}) failed:`, msg1);
-
-    const shouldFallback =
-      /model|unsupported|unknown|not\s+found|unavailable/i.test(msg1);
-    if (!shouldFallback) throw new Error(msg1);
+  for (let attempt = 1; attempt <= LLM_RETRIES; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), LLM_TIMEOUT_MS);
 
     try {
-      return await callModel(fallback);
-    } catch (e2) {
-      const msg2 = e2?.response?.data?.error?.message || e2?.message || String(e2);
-      throw new Error(`Fallback (${fallback}) failed: ${msg2}`);
+      const txt = await callModel(primary, controller.signal);
+      clearTimeout(timeout);
+      return txt;
+    } catch (e1) {
+      clearTimeout(timeout);
+      const code = e1?.status || e1?.response?.status;
+      const retryable = e1?.name === "AbortError" || code === 429 || (code && code >= 500);
+      console.warn(`LLM PRIMARY (${primary}) Fehler (Versuch ${attempt}/${LLM_RETRIES}):`, e1?.message || e1);
+
+      if (attempt === LLM_RETRIES) {
+        // letzter Versuch mit Fallback
+        try {
+          const controller2 = new AbortController();
+          const to2 = setTimeout(() => controller2.abort(), LLM_TIMEOUT_MS);
+          const txt = await callModel(fallback, controller2.signal);
+          clearTimeout(to2);
+          return txt;
+        } catch (e2) {
+          const msg2 = e2?.response?.data?.error?.message || e2?.message || String(e2);
+          throw new Error(`Assistent vorübergehend ausgelastet. (${msg2})`);
+        }
+      }
+
+      if (!retryable) throw new Error(e1?.message || "LLM-Fehler");
+      await new Promise(r => setTimeout(r, attempt * 500)); // einfacher Backoff
     }
   }
+  return "Okay.";
 }
 
 // =============================
@@ -383,7 +409,7 @@ app.post("/chat", async (req, res) => {
     const threadId = crypto.randomBytes(4).toString("hex");
     const cleanHistory = sanitizeHistory(history);
 
-    // 0) FAQ: Sofort-Antwort ohne LLM
+    // 0) FAQ: Sofort-Antwort ohne LLM (super-schnell & stabil)
     const faq = matchFAQ(message);
     if (faq) {
       (async () => {
@@ -407,7 +433,7 @@ app.post("/chat", async (req, res) => {
       return res.json({ ok: true, answer: faq, threadId });
     }
 
-    // 1) (optional) Retrieval – deaktiviert
+    // 1) (optional) Retrieval – hier deaktiviert
     let context = "";
     if (ENABLE_RETRIEVAL) {
       try {
@@ -443,10 +469,7 @@ app.post("/chat", async (req, res) => {
 
     return res.json({ ok: true, answer, threadId });
   } catch (e) {
-    const msg =
-      e?.response?.data?.error?.message ||
-      e?.message ||
-      "Chat fehlgeschlagen";
+    const msg = e?.response?.data?.error?.message || e?.message || "Chat fehlgeschlagen";
     console.error("CHAT ERROR:", msg);
     return res.status(500).json({ ok: false, error: msg });
   }
@@ -518,10 +541,7 @@ app.get("/status", async (_req, res) => {
       reply: chat.choices[0].message.content,
     });
   } catch (e) {
-    const msg =
-      e?.response?.data?.error?.message ||
-      e?.message ||
-      "Status-Test fehlgeschlagen";
+    const msg = e?.response?.data?.error?.message || e?.message || "Status-Test fehlgeschlagen";
     console.error("STATUS ERROR:", msg);
     return res.status(500).json({ ok: false, error: msg });
   }
