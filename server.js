@@ -10,7 +10,9 @@ import { makeTransporter, sendTranscript } from "./mailer.js";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-/* ---------- CORS: mehrere Origins erlauben ---------- */
+console.log("🚀 Neuer Build gestartet");
+
+// ---------- CORS: mehrere Origins erlauben ----------
 const ORIGINS = (process.env.ALLOWED_ORIGIN || "*")
   .split(",")
   .map(s => s.trim())
@@ -28,13 +30,13 @@ app.use(
 
 app.use(bodyParser.json({ limit: "4mb" }));
 
-/* ---------- Static Files (Widget) ---------- */
+// ---------- Static Files (Widget) ----------
 app.use("/public", express.static("public"));
 
-/* ---------- OpenAI ---------- */
+// ---------- OpenAI ----------
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-/* ---------- Bot-Konfiguration ---------- */
+// ---------- Bot-Konfiguration ----------
 const BOT_CONFIG = {
   name: "Sukhothai Assist",
   style: "klar, freundlich, keine Floskeln, kein Gendern",
@@ -66,7 +68,7 @@ function systemPrompt() {
   ].join("\n");
 }
 
-/* ---------- (Optional) Retrieval ---------- */
+// ---------- (Optional) Retrieval ----------
 async function embedText(text) {
   const res = await openai.embeddings.create({
     model: "text-embedding-3-small",
@@ -86,7 +88,7 @@ async function retrieveContext(query, k = 6) {
   return blocks.join("\n\n");
 }
 
-/* ---------- LLM-Antwort mit robustem Fehler-Handling ---------- */
+// ---------- LLM-Antwort mit robustem Fehler-Handling ----------
 async function llmAnswer({ userMsg, history, context }) {
   const messages = [
     {
@@ -121,14 +123,14 @@ function sanitizeHistory(history = []) {
     .slice(-20);
 }
 
-/* ---------- Mail-Transport ---------- */
+// ---------- Mail-Transport ----------
 const transporter = makeTransporter({
   host: process.env.SMTP_HOST,
   user: process.env.SMTP_USER,
   pass: process.env.SMTP_PASS,
 });
 
-/* ---------- Chat Endpoint ---------- */
+// ---------- Chat Endpoint ----------
 app.post("/chat", async (req, res) => {
   try {
     const { message, history = [] } = req.body || {};
@@ -143,14 +145,10 @@ app.post("/chat", async (req, res) => {
     try {
       context = await retrieveContext(message, 6);
     } catch (e) {
-      console.warn("Kontextsuche fehlgeschlagen (fahre ohne Kontext fort):", e?.message);
+      console.warn("Kontextsuche fehlgeschlagen (ohne Kontext weiter):", e?.message);
     }
 
-    const answer = await llmAnswer({
-      userMsg: message,
-      history: cleanHistory,
-      context,
-    });
+    const answer = await llmAnswer({ userMsg: message, history: cleanHistory, context });
 
     // Transcript per Mail (best effort)
     try {
@@ -184,7 +182,7 @@ app.post("/chat", async (req, res) => {
   }
 });
 
-/* ---------- Reservierungs-Endpoint ---------- */
+// ---------- Reservierungs-Endpoint ----------
 app.post("/reserve", async (req, res) => {
   try {
     const { name, phone, persons, date, time, note } = req.body || {};
@@ -221,16 +219,42 @@ app.post("/reserve", async (req, res) => {
   }
 });
 
-/* ---------- Healthcheck ---------- */
+// ---------- Healthcheck ----------
 app.get("/healthz", (_req, res) => {
   res.json({
     ok: true,
     hasKey: !!process.env.OPENAI_API_KEY,
     origins: ORIGINS,
+    version: "status-" + new Date().toISOString(),
   });
 });
 
-/* ---------- Root ---------- */
+// ---------- Modell-/Status-Test ----------
+app.get("/status", async (_req, res) => {
+  try {
+    const chat = await openai.chat.completions.create({
+      model: "gpt-5-mini",
+      messages: [{ role: "user", content: "Sag nur deinen Modellnamen." }],
+      max_tokens: 20,
+      temperature: 0,
+    });
+
+    return res.json({
+      ok: true,
+      model: "gpt-5-mini",
+      reply: chat.choices[0].message.content,
+    });
+  } catch (e) {
+    const msg =
+      e?.response?.data?.error?.message ||
+      e?.message ||
+      "Status-Test fehlgeschlagen";
+    console.error("STATUS ERROR:", msg);
+    return res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+// ---------- Root ----------
 app.get("/", (_req, res) => {
   res.type("text/plain").send("Sukhothai Assist: OK");
 });
