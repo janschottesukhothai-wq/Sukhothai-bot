@@ -1,24 +1,29 @@
+// server.js
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import bodyParser from "body-parser";
 import crypto from "crypto";
 import { OpenAI } from "openai";
-// Optional – Retrieval ist standardmäßig AUS für maximale Geschwindigkeit
+// Retrieval bewusst deaktiviert (für Speed). Später optional einschalten.
 // import { loadStore, topK } from "./vectorStore.js";
 import { makeTransporter, sendTranscript } from "./mailer.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-console.log("🚀 Neuer Build gestartet (fast mode)");
+console.log("🚀 Build gestartet – Fast Mode mit FAQ-Layer");
 
-// ---------- Tuning-Flags ----------
-const ENABLE_RETRIEVAL = false;        // <- für maximale Geschwindigkeit AUS
-const MAX_COMPLETION_TOKENS = 250;     // -> kürzere Antworten = schneller
-const MAX_TURNS = 10;                   // -> nur die letzten 10 Chat-Turns
+// =============================
+// Tuning
+// =============================
+const ENABLE_RETRIEVAL = false;      // für maximale Geschwindigkeit AUS
+const MAX_COMPLETION_TOKENS = 250;   // kürzere Antworten = schneller
+const MAX_TURNS = 10;                // nur letzte 10 Chat-Turns (user+assistant)
 
-// ---------- CORS: mehrere Origins erlauben ----------
+// =============================
+// CORS (mehrere Origins erlaubt)
+// =============================
 const ORIGINS = (process.env.ALLOWED_ORIGIN || "*")
   .split(",")
   .map(s => s.trim())
@@ -36,13 +41,19 @@ app.use(
 
 app.use(bodyParser.json({ limit: "4mb" }));
 
-// ---------- Static Files (Widget) ----------
+// =============================
+// Static Files (Widget)
+// =============================
 app.use("/public", express.static("public"));
 
-// ---------- OpenAI ----------
+// =============================
+// OpenAI
+// =============================
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ---------- Bot-Konfiguration ----------
+// =============================
+// Bot-Konfiguration
+// =============================
 const BOT_CONFIG = {
   name: "Sukhothai Assist",
   style: "klar, freundlich, keine Floskeln, kein Gendern",
@@ -70,11 +81,208 @@ function systemPrompt() {
     `- Reservierungen nie final bestätigen. Immer Kontaktdaten aufnehmen.`,
     `Öffnungszeiten: ${JSON.stringify(BOT_CONFIG.openingHours)}`,
     `Adresse: ${BOT_CONFIG.address}`,
+    `Nützliche Links (falls relevant, kurz verlinken):`,
+    `- Karte: https://www.sukhothai-sprockhoevel.de/karte/`,
+    `- Google Maps: https://maps.app.goo.gl/AnSHY9QvbdWJpZYeA`,
+    `- Gutschein: https://www.yovite.com/Restaurant-Gutschein-R-84849891.html?REF=REST`,
     `Wenn möglich, kurze klare Sätze. Keine Füllwörter.`,
   ].join("\n");
 }
 
-// ---------- (Optional) Retrieval (deaktiviert) ----------
+// =============================
+// FAQ / Sofort-Antworten (kein LLM)
+// =============================
+const FAQ = [
+  // Reservations & Bookings
+  {
+    id: "cancel-policy",
+    patterns: [/cancel|storn|absag/i],
+    answer:
+      "Stornierungen sind bis 1 Stunde vor Öffnung möglich. Für Gruppen ab 10 Personen fällt bei Nichterscheinen oder Reduzierung €10 pro Person an."
+  },
+  {
+    id: "walk-in",
+    patterns: [/walk.?in|spontan|ohne reserv|vorbei kommen|einfach kommen/i],
+    answer: "Für Walk-ins halten wir keine Tische frei."
+  },
+  {
+    id: "deposit",
+    patterns: [/anzahl|deposit|kaution|kreditkarte|sicherheitsleistung/i],
+    answer:
+      "Nur für Gruppen ab 10 Personen benötigen wir eine Kreditkarten-Sicherung."
+  },
+
+  // Menu & Food
+  {
+    id: "menu-general",
+    patterns: [/menü|karte|speisekarte|gerichte|essen/i],
+    answer:
+      "Ich habe keinen Einblick in die tagesaktuelle Karte. Gern der Online-Menülink: https://www.sukhothai-sprockhoevel.de/karte/"
+  },
+  {
+    id: "dietary",
+    patterns: [/vegan|vegetar|gluten|halal|laktos|allerg/i],
+    answer:
+      "Vegetarische, vegane und glutenfreie Optionen sind verfügbar. Hier ist die Karte: https://www.sukhothai-sprockhoevel.de/karte/"
+  },
+  {
+    id: "kids",
+    patterns: [/kinder|kindermen|kids/i],
+    answer:
+      "Ja, es gibt Kindermenüs: vegane Nuggets mit Pommes, vegane Bratnudeln mit Gemüse, Pommes mit Ketchup sowie kleine Ente süß-sauer mit Reis."
+  },
+  {
+    id: "bring-own",
+    patterns: [/eigen(es|e)|mitbringen|eigene(n)? (kuchen|torte|speisen|getränk)/i],
+    answer:
+      "Nur nach vorheriger Absprache. Soll ich dich direkt mit dem Restaurant verbinden?"
+  },
+  {
+    id: "xmas-hours",
+    patterns: [/weihnacht/i],
+    answer:
+      "An beiden Weihnachtsfeiertagen geöffnet: 12:00–14:30 und 17:30–21:30."
+  },
+
+  // Location & Accessibility
+  {
+    id: "maps",
+    patterns: [/wo seid|adresse|wie (komm|finde)|navigat|karte google/i],
+    answer:
+      "Hier ist der Google-Maps-Link: https://maps.app.goo.gl/AnSHY9QvbdWJpZYeA"
+  },
+  {
+    id: "parking",
+    patterns: [/park(en|platz)|parkmöglichkeit/i],
+    answer:
+      "Kostenlose Parkplätze sind direkt vor dem Restaurant oder in der Nähe verfügbar."
+  },
+  {
+    id: "wheelchair",
+    patterns: [/rollstuhl|barrierefrei|behindertengerecht|behinderten WC|barriere/i],
+    answer:
+      "Leider nein – das Restaurant ist nicht rollstuhlgerecht und es gibt keine barrierefreie Toilette."
+  },
+  {
+    id: "public-transport",
+    patterns: [/bus|bahn|öffentliche(n)? verkehr|ÖPNV|zug/i],
+    answer:
+      "Ja, der Sprockhövel Busbahnhof ist in der Nähe."
+  },
+
+  // Other
+  {
+    id: "pets",
+    patterns: [/hund|haustier|tier|pet/i],
+    answer:
+      "Haustiere sind willkommen – wir servieren frisches Wasser und einen Keks."
+  },
+  {
+    id: "giftcards",
+    patterns: [/gutschein|gift ?card/i],
+    answer:
+      "Ja, Gutscheine gibt es vor Ort oder online. Link: https://www.yovite.com/Restaurant-Gutschein-R-84849891.html?REF=REST"
+  },
+  {
+    id: "amenities",
+    patterns: [/kinderstuhl|hochstuhl|terrasse|außen|draussen|außensitz/i],
+    answer:
+      "Ja – es gibt Hochstühle und eine Terrasse."
+  },
+  {
+    id: "contact",
+    patterns: [/kontakt|erreichen|frage(n)? stellen|email|mail/i],
+    answer:
+      "Am besten per E-Mail an info@sukhothai-sprockhoevel.de."
+  },
+  {
+    id: "email-confirm",
+    patterns: [/bestätig.*(mail|e-?mail)|reservierungsbestät/i],
+    answer:
+      "Eine E-Mail-Bestätigung gibt es nur bei Online-Reservierung. Am Telefon senden wir die Bestätigung per WhatsApp."
+  },
+  {
+    id: "catering",
+    patterns: [/cater|lieferservice|veranstaltung|feier/i],
+    answer:
+      "Ja, Catering ab 15 Personen im Ennepe-Ruhr-Kreis. Bitte Details per E-Mail an info@sukhothai-sprockhoevel.de senden."
+  },
+  {
+    id: "outdoor",
+    patterns: [/außen|terrasse|draußen|biergarten/i],
+    answer:
+      "Ja, wir haben eine Terrasse."
+  },
+  {
+    id: "payments",
+    patterns: [/karte|kreditkarte|ec|mastercard|visa|apple|google pay|paypal/i],
+    answer:
+      "Wir akzeptieren EC, Visa, American Express, Mastercard, Apple Pay, Google Pay & PayPal."
+  },
+  {
+    id: "ev-charging",
+    patterns: [/lade(gerät|station)|elektro(auto|fahrzeug)/i],
+    answer:
+      "Ladestationen sind derzeit nicht verfügbar."
+  },
+  {
+    id: "cooking-class",
+    patterns: [/koch(kurs|schule)/i],
+    answer:
+      "Dieses Jahr finden keine Kochkurse statt."
+  },
+  {
+    id: "capacity",
+    patterns: [/wie viele gäste|kapazität|plätze|personen/i],
+    answer:
+      "Bis zu 80 Sitzplätze im Restaurant. Private Veranstaltungen bis 36 Personen in einem separaten Raum."
+  },
+  {
+    id: "takeaway",
+    patterns: [/take.?away|mitnehmen|to go|abholen|online bestell/i],
+    answer:
+      "Ja, alle Gerichte gibt es auch zum Mitnehmen (ökologisch verpackt). Online-Bestellung zu bestimmten Zeiten, telefonische Bestellungen während der Öffnungszeiten. Soll ich dich verbinden?"
+  },
+  {
+    id: "wifi",
+    patterns: [/wifi|wlan|internet/i],
+    answer:
+      "Ja, es gibt kostenloses WLAN."
+  },
+
+  // Kitchen Opening Hours – inkl. Sonntag Mittag
+  {
+    id: "hours",
+    patterns: [/öffnungszeit|wann.*offen|wann.*geöffnet|lunch|mittag|abend|dinner|küchenzeit/i],
+    answer: (text) => {
+      const isSundayLunch = /sonntag.*(mittag|lunch|12|13|14)/i.test(text);
+      if (isSundayLunch) {
+        return "Sonntag Mittag geöffnet: 12:00–14:00 (letzte Küchenbestellung 13:50).";
+      }
+      return [
+        "Küchenzeiten:",
+        "Dienstag: geschlossen",
+        "Mi–Mo: 17:30–21:30 (letzte Küchenbestellung 21:15)",
+        "Sonntag (Mittag): 12:00–14:00 (letzte Küchenbestellung 13:50)"
+      ].join("\n");
+    }
+  }
+];
+
+function matchFAQ(userText) {
+  if (!userText) return null;
+  for (const item of FAQ) {
+    const hit = item.patterns.some(rx => rx.test(userText));
+    if (hit) {
+      return typeof item.answer === "function" ? item.answer(userText) : item.answer;
+    }
+  }
+  return null;
+}
+
+// =============================
+// (Optional) Retrieval – deaktiviert
+// =============================
 /*
 async function embedText(text) {
   const res = await openai.embeddings.create({
@@ -96,19 +304,22 @@ async function retrieveContext(query, k = 3) {
 }
 */
 
-// ---------- Verlauf säubern / kürzen ----------
+// =============================
+// Verlauf kürzen
+// =============================
 function sanitizeHistory(history = []) {
   return history
     .filter(h => h && h.role && h.content)
     .map(h => ({
       role: h.role,
-      // harte Kürzung der Länge pro Nachricht – hält den Prompt klein
       content: String(h.content).slice(0, 1200)
     }))
-    .slice(-MAX_TURNS * 2); // user+assistant pro Turn
+    .slice(-MAX_TURNS * 2);
 }
 
-// ---------- LLM-Antwort mit Fallback ----------
+// =============================
+// LLM mit Fallback
+// =============================
 async function llmAnswer({ userMsg, history, context }) {
   const messages = [
     {
@@ -123,15 +334,12 @@ async function llmAnswer({ userMsg, history, context }) {
     const resp = await openai.chat.completions.create({
       model,
       messages,
-      // GPT-5-Modelle: KEINE temperature; optional Outputlimit:
       max_completion_tokens: MAX_COMPLETION_TOKENS,
     });
     return resp.choices[0].message.content;
   }
 
-  // 1) Schnell & günstig
   const primary = "gpt-5-mini";
-  // 2) Robuster Fallback
   const fallback = "gpt-4o-mini";
 
   try {
@@ -140,13 +348,11 @@ async function llmAnswer({ userMsg, history, context }) {
     const msg1 = e1?.response?.data?.error?.message || e1?.message || String(e1);
     console.warn(`LLM PRIMARY (${primary}) failed:`, msg1);
 
-    // Nur bei „modellbezogenen“ Fehlern auf Fallback gehen
-    const shouldFallback = /model|unsupported|Unknown|not\s+found|unavailable/i.test(msg1);
+    const shouldFallback =
+      /model|unsupported|unknown|not\s+found|unavailable/i.test(msg1);
     if (!shouldFallback) throw new Error(msg1);
 
     try {
-      // Beim Fallback akzeptieren wir default temperature (0.2 ist ok),
-      // setzen aber KEINE, um kompatibel zu bleiben.
       return await callModel(fallback);
     } catch (e2) {
       const msg2 = e2?.response?.data?.error?.message || e2?.message || String(e2);
@@ -155,14 +361,18 @@ async function llmAnswer({ userMsg, history, context }) {
   }
 }
 
-// ---------- Mail-Transport ----------
+// =============================
+// Mail-Transport
+// =============================
 const transporter = makeTransporter({
   host: process.env.SMTP_HOST,
   user: process.env.SMTP_USER,
   pass: process.env.SMTP_PASS,
 });
 
-// ---------- Chat Endpoint ----------
+// =============================
+// Chat Endpoint
+// =============================
 app.post("/chat", async (req, res) => {
   try {
     const { message, history = [] } = req.body || {};
@@ -173,19 +383,45 @@ app.post("/chat", async (req, res) => {
     const threadId = crypto.randomBytes(4).toString("hex");
     const cleanHistory = sanitizeHistory(history);
 
+    // 0) FAQ: Sofort-Antwort ohne LLM
+    const faq = matchFAQ(message);
+    if (faq) {
+      (async () => {
+        try {
+          const subject = `[Sukhothai Bot] FAQ #${threadId}`;
+          const lines = [
+            ...cleanHistory,
+            { role: "user", content: message },
+            { role: "assistant", content: faq },
+          ].map(m => `${m.role.toUpperCase()}: ${m.content}`).join("\n\n");
+          await sendTranscript(transporter, {
+            from: process.env.EMAIL_FROM,
+            to: process.env.EMAIL_TO,
+            subject,
+            text: lines
+          });
+        } catch (err) {
+          console.error("Mailfehler FAQ:", err?.message);
+        }
+      })();
+      return res.json({ ok: true, answer: faq, threadId });
+    }
+
+    // 1) (optional) Retrieval – deaktiviert
     let context = "";
     if (ENABLE_RETRIEVAL) {
       try {
-        // context = await retrieveContext(message, 3); // kleiner k -> schneller
-        context = ""; // optional – hier deaktiviert
+        // context = await retrieveContext(message, 3);
+        context = "";
       } catch (e) {
         console.warn("Kontextsuche fehlgeschlagen (ohne Kontext weiter):", e?.message);
       }
     }
 
+    // 2) LLM
     const answer = await llmAnswer({ userMsg: message, history: cleanHistory, context });
 
-    // Transcript per Mail (best effort, blockiert Antwort nicht)
+    // Mail (best effort, async)
     (async () => {
       try {
         const subject = `[Sukhothai Bot] Chat #${threadId}`;
@@ -193,10 +429,7 @@ app.post("/chat", async (req, res) => {
           ...cleanHistory,
           { role: "user", content: message },
           { role: "assistant", content: answer },
-        ]
-          .map(m => `${m.role.toUpperCase()}: ${m.content}`)
-          .join("\n\n");
-
+        ].map(m => `${m.role.toUpperCase()}: ${m.content}`).join("\n\n");
         await sendTranscript(transporter, {
           from: process.env.EMAIL_FROM,
           to: process.env.EMAIL_TO,
@@ -219,7 +452,9 @@ app.post("/chat", async (req, res) => {
   }
 });
 
-// ---------- Reservierungs-Endpoint ----------
+// =============================
+// Reservierungs-Endpoint
+// =============================
 app.post("/reserve", async (req, res) => {
   try {
     const { name, phone, persons, date, time, note } = req.body || {};
@@ -256,7 +491,9 @@ app.post("/reserve", async (req, res) => {
   }
 });
 
-// ---------- Healthcheck ----------
+// =============================
+// Health/Status
+// =============================
 app.get("/healthz", (_req, res) => {
   res.json({
     ok: true,
@@ -267,13 +504,12 @@ app.get("/healthz", (_req, res) => {
   });
 });
 
-// ---------- Modell-/Status-Test ----------
 app.get("/status", async (_req, res) => {
   try {
     const chat = await openai.chat.completions.create({
       model: "gpt-5-mini",
       messages: [{ role: "user", content: "Sag nur deinen Modellnamen." }],
-      max_completion_tokens: 16 // kleiner = schneller
+      max_completion_tokens: 16
     });
 
     return res.json({
@@ -291,7 +527,9 @@ app.get("/status", async (_req, res) => {
   }
 });
 
-// ---------- Root ----------
+// =============================
+// Root
+// =============================
 app.get("/", (_req, res) => {
   res.type("text/plain").send("Sukhothai Assist: OK");
 });
