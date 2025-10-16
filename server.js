@@ -4,13 +4,19 @@ import cors from "cors";
 import bodyParser from "body-parser";
 import crypto from "crypto";
 import { OpenAI } from "openai";
-import { loadStore, topK } from "./vectorStore.js";
+// Optional – Retrieval ist standardmäßig AUS für maximale Geschwindigkeit
+// import { loadStore, topK } from "./vectorStore.js";
 import { makeTransporter, sendTranscript } from "./mailer.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-console.log("🚀 Neuer Build gestartet");
+console.log("🚀 Neuer Build gestartet (fast mode)");
+
+// ---------- Tuning-Flags ----------
+const ENABLE_RETRIEVAL = false;        // <- für maximale Geschwindigkeit AUS
+const MAX_COMPLETION_TOKENS = 250;     // -> kürzere Antworten = schneller
+const MAX_TURNS = 10;                   // -> nur die letzten 10 Chat-Turns
 
 // ---------- CORS: mehrere Origins erlauben ----------
 const ORIGINS = (process.env.ALLOWED_ORIGIN || "*")
@@ -68,7 +74,8 @@ function systemPrompt() {
   ].join("\n");
 }
 
-// ---------- (Optional) Retrieval ----------
+// ---------- (Optional) Retrieval (deaktiviert) ----------
+/*
 async function embedText(text) {
   const res = await openai.embeddings.create({
     model: "text-embedding-3-small",
@@ -77,7 +84,7 @@ async function embedText(text) {
   return res.data[0].embedding;
 }
 
-async function retrieveContext(query, k = 6) {
+async function retrieveContext(query, k = 3) {
   const store = loadStore();
   if (!store.items || !store.items.length) return "";
   const qvec = await embedText(query);
@@ -87,8 +94,21 @@ async function retrieveContext(query, k = 6) {
   );
   return blocks.join("\n\n");
 }
+*/
 
-// ---------- LLM-Antwort (ohne temperature) ----------
+// ---------- Verlauf säubern / kürzen ----------
+function sanitizeHistory(history = []) {
+  return history
+    .filter(h => h && h.role && h.content)
+    .map(h => ({
+      role: h.role,
+      // harte Kürzung der Länge pro Nachricht – hält den Prompt klein
+      content: String(h.content).slice(0, 1200)
+    }))
+    .slice(-MAX_TURNS * 2); // user+assistant pro Turn
+}
+
+// ---------- LLM-Antwort mit Fallback ----------
 async function llmAnswer({ userMsg, history, context }) {
   const messages = [
     {
@@ -99,30 +119,40 @@ async function llmAnswer({ userMsg, history, context }) {
     { role: "user", content: userMsg },
   ];
 
-  try {
-    const chat = await openai.chat.completions.create({
-      model: "gpt-5-mini",
-      messages
-      // WICHTIG: keine temperature – gpt-5-mini erlaubt nur Default
-      // Optional (falls du Antworten begrenzen willst):
-      // max_completion_tokens: 300
+  async function callModel(model) {
+    const resp = await openai.chat.completions.create({
+      model,
+      messages,
+      // GPT-5-Modelle: KEINE temperature; optional Outputlimit:
+      max_completion_tokens: MAX_COMPLETION_TOKENS,
     });
-    return chat.choices[0].message.content;
-  } catch (e) {
-    const msg =
-      e?.response?.data?.error?.message ||
-      e?.error?.message ||
-      e?.message ||
-      "LLM-Fehler";
-    throw new Error(msg);
+    return resp.choices[0].message.content;
   }
-}
 
-function sanitizeHistory(history = []) {
-  return history
-    .filter(h => h && h.role && h.content)
-    .map(h => ({ role: h.role, content: String(h.content).slice(0, 6000) }))
-    .slice(-20);
+  // 1) Schnell & günstig
+  const primary = "gpt-5-mini";
+  // 2) Robuster Fallback
+  const fallback = "gpt-4o-mini";
+
+  try {
+    return await callModel(primary);
+  } catch (e1) {
+    const msg1 = e1?.response?.data?.error?.message || e1?.message || String(e1);
+    console.warn(`LLM PRIMARY (${primary}) failed:`, msg1);
+
+    // Nur bei „modellbezogenen“ Fehlern auf Fallback gehen
+    const shouldFallback = /model|unsupported|Unknown|not\s+found|unavailable/i.test(msg1);
+    if (!shouldFallback) throw new Error(msg1);
+
+    try {
+      // Beim Fallback akzeptieren wir default temperature (0.2 ist ok),
+      // setzen aber KEINE, um kompatibel zu bleiben.
+      return await callModel(fallback);
+    } catch (e2) {
+      const msg2 = e2?.response?.data?.error?.message || e2?.message || String(e2);
+      throw new Error(`Fallback (${fallback}) failed: ${msg2}`);
+    }
+  }
 }
 
 // ---------- Mail-Transport ----------
@@ -144,34 +174,39 @@ app.post("/chat", async (req, res) => {
     const cleanHistory = sanitizeHistory(history);
 
     let context = "";
-    try {
-      context = await retrieveContext(message, 6);
-    } catch (e) {
-      console.warn("Kontextsuche fehlgeschlagen (ohne Kontext weiter):", e?.message);
+    if (ENABLE_RETRIEVAL) {
+      try {
+        // context = await retrieveContext(message, 3); // kleiner k -> schneller
+        context = ""; // optional – hier deaktiviert
+      } catch (e) {
+        console.warn("Kontextsuche fehlgeschlagen (ohne Kontext weiter):", e?.message);
+      }
     }
 
     const answer = await llmAnswer({ userMsg: message, history: cleanHistory, context });
 
-    // Transcript per Mail (best effort)
-    try {
-      const subject = `[Sukhothai Bot] Chat #${threadId}`;
-      const lines = [
-        ...cleanHistory,
-        { role: "user", content: message },
-        { role: "assistant", content: answer },
-      ]
-        .map(m => `${m.role.toUpperCase()}: ${m.content}`)
-        .join("\n\n");
+    // Transcript per Mail (best effort, blockiert Antwort nicht)
+    (async () => {
+      try {
+        const subject = `[Sukhothai Bot] Chat #${threadId}`;
+        const lines = [
+          ...cleanHistory,
+          { role: "user", content: message },
+          { role: "assistant", content: answer },
+        ]
+          .map(m => `${m.role.toUpperCase()}: ${m.content}`)
+          .join("\n\n");
 
-      await sendTranscript(transporter, {
-        from: process.env.EMAIL_FROM,
-        to: process.env.EMAIL_TO,
-        subject,
-        text: lines,
-      });
-    } catch (err) {
-      console.error("Mailfehler:", err?.message);
-    }
+        await sendTranscript(transporter, {
+          from: process.env.EMAIL_FROM,
+          to: process.env.EMAIL_TO,
+          subject,
+          text: lines,
+        });
+      } catch (err) {
+        console.error("Mailfehler:", err?.message);
+      }
+    })();
 
     return res.json({ ok: true, answer, threadId });
   } catch (e) {
@@ -208,7 +243,7 @@ app.post("/reserve", async (req, res) => {
         from: process.env.EMAIL_FROM,
         to: process.env.EMAIL_TO,
         subject,
-        text,
+        text
       });
     } catch (err) {
       console.error("Mailfehler Reserve:", err?.message);
@@ -227,6 +262,7 @@ app.get("/healthz", (_req, res) => {
     ok: true,
     hasKey: !!process.env.OPENAI_API_KEY,
     origins: ORIGINS,
+    fastMode: !ENABLE_RETRIEVAL,
     version: "status-" + new Date().toISOString(),
   });
 });
@@ -237,7 +273,7 @@ app.get("/status", async (_req, res) => {
     const chat = await openai.chat.completions.create({
       model: "gpt-5-mini",
       messages: [{ role: "user", content: "Sag nur deinen Modellnamen." }],
-      max_completion_tokens: 20 // <-- wichtiger Fix für GPT-5-Modelle
+      max_completion_tokens: 16 // kleiner = schneller
     });
 
     return res.json({
