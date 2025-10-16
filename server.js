@@ -21,7 +21,7 @@ const ORIGINS = (process.env.ALLOWED_ORIGIN || "*")
 app.use(
   cors({
     origin: (origin, cb) => {
-      if (!origin) return cb(null, true); // z.B. curl/SSR
+      if (!origin) return cb(null, true); // z. B. curl/SSR
       if (ORIGINS.includes("*") || ORIGINS.includes(origin)) return cb(null, true);
       return cb(new Error(`CORS blocked: ${origin}`));
     },
@@ -88,7 +88,7 @@ async function retrieveContext(query, k = 6) {
   return blocks.join("\n\n");
 }
 
-// ---------- LLM-Antwort mit robustem Fehler-Handling ----------
+// ---------- LLM-Antwort (ohne temperature) ----------
 async function llmAnswer({ userMsg, history, context }) {
   const messages = [
     {
@@ -102,8 +102,8 @@ async function llmAnswer({ userMsg, history, context }) {
   try {
     const chat = await openai.chat.completions.create({
       model: "gpt-5-mini",
-      messages,
-      temperature: 0.2,
+      messages
+      // WICHTIG: keine temperature übergeben – gpt-5-mini erlaubt nur Default
     });
     return chat.choices[0].message.content;
   } catch (e) {
@@ -118,8 +118,8 @@ async function llmAnswer({ userMsg, history, context }) {
 
 function sanitizeHistory(history = []) {
   return history
-    .filter((h) => h && h.role && h.content)
-    .map((h) => ({ role: h.role, content: String(h.content).slice(0, 6000) }))
+    .filter(h => h && h.role && h.content)
+    .map(h => ({ role: h.role, content: String(h.content).slice(0, 6000) }))
     .slice(-20);
 }
 
@@ -158,7 +158,7 @@ app.post("/chat", async (req, res) => {
         { role: "user", content: message },
         { role: "assistant", content: answer },
       ]
-        .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
+        .map(m => `${m.role.toUpperCase()}: ${m.content}`)
         .join("\n\n");
 
       await sendTranscript(transporter, {
@@ -235,8 +235,8 @@ app.get("/status", async (_req, res) => {
     const chat = await openai.chat.completions.create({
       model: "gpt-5-mini",
       messages: [{ role: "user", content: "Sag nur deinen Modellnamen." }],
-      max_tokens: 20,
-      temperature: 0,
+      max_tokens: 20
+      // KEINE temperature übergeben
     });
 
     return res.json({
