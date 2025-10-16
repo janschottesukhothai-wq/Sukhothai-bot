@@ -103,7 +103,6 @@ app.post("/chat", async (req, res) => {
     const context = await retrieveContext(message, 6);
     const answer = await llmAnswer({ userMsg: message, history: cleanHistory, context });
 
-    // Transcript mailen (best effort)
     try {
       const subject = `[Sukhothai Bot] Chat #${threadId}`;
       const lines = [...cleanHistory, { role: "user", content: message }, { role: "assistant", content: answer }]
