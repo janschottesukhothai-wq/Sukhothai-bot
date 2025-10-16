@@ -99,7 +99,7 @@ async function llmAnswer({ userMsg, history, context }) {
 
   try {
     const chat = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: "gpt-5-mini",
       messages,
       temperature: 0.2,
     });
