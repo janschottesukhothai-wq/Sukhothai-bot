@@ -103,7 +103,9 @@ async function llmAnswer({ userMsg, history, context }) {
     const chat = await openai.chat.completions.create({
       model: "gpt-5-mini",
       messages
-      // WICHTIG: keine temperature übergeben – gpt-5-mini erlaubt nur Default
+      // WICHTIG: keine temperature – gpt-5-mini erlaubt nur Default
+      // Optional (falls du Antworten begrenzen willst):
+      // max_completion_tokens: 300
     });
     return chat.choices[0].message.content;
   } catch (e) {
@@ -235,8 +237,7 @@ app.get("/status", async (_req, res) => {
     const chat = await openai.chat.completions.create({
       model: "gpt-5-mini",
       messages: [{ role: "user", content: "Sag nur deinen Modellnamen." }],
-      max_tokens: 20
-      // KEINE temperature übergeben
+      max_completion_tokens: 20 // <-- wichtiger Fix für GPT-5-Modelle
     });
 
     return res.json({
