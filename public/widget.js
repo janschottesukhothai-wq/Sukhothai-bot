@@ -1,8 +1,8 @@
 (() => {
-  // -------- Settings --------
+  // -------- Einstellungen --------
   const API = window.SUKH_TALK_API || "/chat"; // Chat-Endpoint
 
-  // -------- Styles --------
+  // -------- Styles (mit !important gegen Theme-Overrides) --------
   const css = `
   #sb-wrap{
     position:fixed;
@@ -10,60 +10,65 @@
     top:50%;
     transform:translateY(-50%);
     z-index:2147483647;
-    font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+    font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif !important;
   }
   #sb-open{
-    border:none;
-    border-radius:9999px;
-    width:56px;height:56px;
-    background:#000;color:#fff;
-    box-shadow:0 6px 24px rgba(0,0,0,.2);
-    cursor:pointer;font-weight:700;
+    border:none !important;
+    border-radius:9999px !important;
+    width:56px !important; height:56px !important;
+    background:#000 !important; color:#fff !important;
+    box-shadow:0 6px 24px rgba(0,0,0,.2) !important;
+    cursor:pointer !important; font-weight:700 !important;
   }
   #sb-panel{
-    display:none; /* wird mit erstem Klick geöffnet */
-    width:min(360px, calc(100vw - 32px));
-    height:min(560px, calc(100vh - 120px));
-    margin-top:12px;
-    background:#fff;border-radius:16px;
-    box-shadow:0 16px 48px rgba(0,0,0,.28);
-    overflow:hidden;display:flex;flex-direction:column;
-    box-sizing:border-box;
+    display:none; /* Start: versteckt */
+    width:min(360px, calc(100vw - 32px)) !important;
+    height:min(560px, calc(100vh - 120px)) !important;
+    margin-top:12px !important;
+    background:#fff !important; color:#111 !important;
+    border-radius:16px !important;
+    box-shadow:0 16px 48px rgba(0,0,0,.28) !important;
+    overflow:hidden !important; display:flex !important; flex-direction:column !important;
+    box-sizing:border-box !important;
   }
   #sb-head{
-    background:#000;color:#fff;
-    padding:12px 14px;font-weight:700;
+    background:#000 !important; color:#fff !important;
+    padding:12px 14px !important; font-weight:700 !important;
+    display:flex !important; align-items:center !important; justify-content:space-between !important;
+  }
+  #sb-close{
+    background:transparent !important; border:none !important;
+    color:#fff !important; font-size:20px !important; line-height:1 !important;
+    cursor:pointer !important; padding:0 6px !important;
   }
   #sb-log{
-    flex:1;overflow:auto;padding:12px;
-    font-size:14px;line-height:1.45;background:#fff;
+    flex:1 1 auto !important; overflow:auto !important; padding:12px !important;
+    background:#fff !important; color:#111 !important;
+    font-size:14px !important; line-height:1.45 !important;
   }
-  #sb-log .msg{margin:8px 0;}
-  #sb-log .who{font-weight:700;margin-bottom:2px;}
-  #sb-log .text{white-space:pre-wrap;}
+  #sb-log .msg{ margin:8px 0 !important; }
+  #sb-log .who{ font-weight:700 !important; margin-bottom:2px !important; }
+  #sb-log .text{ white-space:pre-wrap !important; }
   #sb-inp{
-    display:flex;gap:8px;border-top:1px solid #eee;
-    padding:10px;background:#fff;box-sizing:border-box;
+    display:flex !important; gap:8px !important; border-top:1px solid #eee !important;
+    padding:10px !important; background:#fff !important; box-sizing:border-box !important;
   }
   #sb-input{
-    flex:1 1 auto;min-width:0;
-    border:1px solid #ddd;border-radius:10px;
-    padding:10px 12px;outline:none;
+    flex:1 1 auto !important; min-width:0 !important;
+    border:1px solid #ddd !important; border-radius:10px !important;
+    padding:10px 12px !important; outline:none !important;
+    background:#fff !important; color:#111 !important;
   }
+  #sb-input::placeholder{ color:#777 !important; }
   #sb-send{
-    flex:0 0 auto;border:none;border-radius:10px;
-    padding:10px 16px;background:#000;color:#fff;
-    font-weight:600;cursor:pointer;
+    flex:0 0 auto !important; border:none !important; border-radius:10px !important;
+    padding:10px 16px !important; background:#000 !important; color:#fff !important;
+    font-weight:600 !important; cursor:pointer !important;
   }
-  #sb-send[disabled]{opacity:.6;cursor:default;}
-
+  #sb-send[disabled]{ opacity:.6 !important; cursor:default !important; }
   @media (max-width:480px){
-    #sb-panel{
-      width:calc(100vw - 32px);
-      height:min(70vh, calc(100vh - 140px));
-    }
-  }
-  `;
+    #sb-panel{ width:calc(100vw - 32px) !important; height:min(70vh, calc(100vh - 140px)) !important; }
+  }`;
   const style = document.createElement("style");
   style.textContent = css;
   document.head.appendChild(style);
@@ -74,7 +79,10 @@
   wrap.innerHTML = `
     <button id="sb-open" aria-expanded="false" aria-controls="sb-panel" title="Chat öffnen">Chat</button>
     <div id="sb-panel" role="dialog" aria-label="Sukhothai Assist">
-      <div id="sb-head">Sukhothai Assist</div>
+      <div id="sb-head">
+        <span>Sukhothai Assist</span>
+        <button id="sb-close" aria-label="Schließen" title="Schließen">×</button>
+      </div>
       <div id="sb-log"></div>
       <div id="sb-inp">
         <input id="sb-input" type="text" placeholder="Frage stellen…" />
@@ -86,6 +94,7 @@
 
   // -------- Logic --------
   const openBtn = wrap.querySelector("#sb-open");
+  const closeBtn = wrap.querySelector("#sb-close");
   const panel   = wrap.querySelector("#sb-panel");
   const log     = wrap.querySelector("#sb-log");
   const input   = wrap.querySelector("#sb-input");
@@ -110,28 +119,29 @@
     if (panel.style.display !== "block") {
       panel.style.display = "block";
       openBtn.setAttribute("aria-expanded","true");
-      // Sofort fokussieren → ein Klick reicht auch auf iOS
-      setTimeout(() => input.focus(), 10);
+      setTimeout(() => { try { input.focus(); } catch(_){} }, 10); // Ein-Klick-Öffnen
     }
   }
-  function togglePanel(){
-    if (panel.style.display === "block") {
+  function closePanel(){
+    if (panel.style.display !== "none") {
       panel.style.display = "none";
       openBtn.setAttribute("aria-expanded","false");
-    } else {
-      openPanel();
     }
   }
 
-  // Ein-Klick-Öffnen: click/touch/pointer
-  const openOnce = (ev) => { ev.preventDefault(); openPanel(); };
+  // Ein-Klick-Öffnen (auch auf iOS zuverlässig)
+  const openOnce = (ev) => { ev.preventDefault && ev.preventDefault(); openPanel(); };
   openBtn.addEventListener("click", openOnce, { passive:false });
   openBtn.addEventListener("touchend", openOnce, { passive:false });
   openBtn.addEventListener("pointerup", openOnce, { passive:false });
+  closeBtn.addEventListener("click", closePanel);
 
-  // Optional: Panel schließen beim Klick auf Header (kannst du entfernen)
-  wrap.querySelector("#sb-head").addEventListener("click", togglePanel);
+  // ESC schließt
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape") closePanel();
+  });
 
+  // Nachricht senden
   async function sendMsg(){
     const msg = (input.value || "").trim();
     if (!msg || send.disabled) return;
@@ -164,12 +174,4 @@
 
   send.addEventListener("click", sendMsg);
   input.addEventListener("keydown", e => { if (e.key === "Enter") sendMsg(); });
-
-  // Optional: ESC schließt
-  document.addEventListener("keydown", e => {
-    if (e.key === "Escape" && panel.style.display === "block") {
-      panel.style.display = "none";
-      openBtn.setAttribute("aria-expanded","false");
-    }
-  });
 })();
