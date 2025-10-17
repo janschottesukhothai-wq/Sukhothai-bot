@@ -5,7 +5,7 @@ import cors from "cors";
 import bodyParser from "body-parser";
 import crypto from "crypto";
 import { OpenAI } from "openai";
-// Retrieval ist für maximale Geschwindigkeit deaktiviert.
+// Retrieval bleibt für maximale Geschwindigkeit deaktiviert
 // import { loadStore, topK } from "./vectorStore.js";
 import { makeTransporter, sendTranscript } from "./mailer.js";
 
@@ -17,11 +17,11 @@ console.log("🚀 Build gestartet – Fast Mode + FAQ-Layer");
 // =============================
 // Tuning
 // =============================
-const ENABLE_RETRIEVAL = false;       // später bei Bedarf aktivieren
-const MAX_COMPLETION_TOKENS = 220;    // kurze Antworten -> schneller/konstanter
+const ENABLE_RETRIEVAL = false;        // bei Bedarf aktivieren
+const MAX_COMPLETION_TOKENS = 220;     // kürzere Antworten -> schneller/konstanter
 const MAX_TURNS = 10;                  // nur letzte 10 user/assistant-Turns
-const LLM_TIMEOUT_MS = 12000;          // 12s Timeout
-const LLM_RETRIES = 3;                 // Retries bei 429/5xx/Timeout
+const LLM_TIMEOUT_MS = 12000;          // 12s Timeout pro Versuch
+const LLM_RETRIES = 3;                 // Retries bei 429/5xx/Timeout/leerem Text
 
 // =============================
 // CORS (mehrere Origins erlaubt)
@@ -288,30 +288,6 @@ function matchFAQ(userText) {
 }
 
 // =============================
-// (Optional) Retrieval – deaktiviert
-// =============================
-/*
-async function embedText(text) {
-  const res = await openai.embeddings.create({
-    model: "text-embedding-3-small",
-    input: text,
-  });
-  return res.data[0].embedding;
-}
-
-async function retrieveContext(query, k = 3) {
-  const store = loadStore();
-  if (!store.items || !store.items.length) return "";
-  const qvec = await embedText(query);
-  const hits = topK(store, qvec, k);
-  const blocks = hits.map(
-    (h) => `# Quelle: ${h.meta?.source || "unbekannt"}\n${h.text}`
-  );
-  return blocks.join("\n\n");
-}
-*/
-
-// =============================
 // Verlauf kürzen
 // =============================
 function sanitizeHistory(history = []) {
@@ -323,6 +299,7 @@ function sanitizeHistory(history = []) {
 
 // =============================
 // LLM mit Timeout + Retries + Fallback
+// (verhindert leere/„Okay.“-Antworten)
 // =============================
 async function llmAnswer({ userMsg, history, context }) {
   const messages = [
@@ -331,7 +308,7 @@ async function llmAnswer({ userMsg, history, context }) {
       content:
         systemPrompt() +
         (context ? `\n\nKontext:\n${context}` : "") +
-        "\nAntworte kurz und präzise (1–4 Sätze).",
+        "\nAntworte kurz und präzise (1–4 Sätze). Wenn du etwas nicht sicher weißt, sag das offen und biete Links/Alternativen an.",
     },
     ...history,
     { role: "user", content: userMsg },
@@ -346,7 +323,14 @@ async function llmAnswer({ userMsg, history, context }) {
       },
       { signal }
     );
-    return resp.choices?.[0]?.message?.content?.trim() || "Okay.";
+
+    const txt = (resp.choices?.[0]?.message?.content || "").trim();
+
+    // Leere oder triviale Antworten explizit ablehnen => retry/fallback
+    if (!txt || /^ok(ay)?[.!]?$/i.test(txt) || /^verstanden[.!]?$/i.test(txt)) {
+      throw new Error("Empty or trivial completion");
+    }
+    return txt;
   }
 
   const primary = "gpt-5-mini";
@@ -362,29 +346,39 @@ async function llmAnswer({ userMsg, history, context }) {
       return txt;
     } catch (e1) {
       clearTimeout(timeout);
+
       const code = e1?.status || e1?.response?.status;
-      const retryable = e1?.name === "AbortError" || code === 429 || (code && code >= 500);
+      const retryable =
+        e1?.name === "AbortError" || code === 429 || (code && code >= 500) || /empty|trivial/i.test(e1?.message);
+
       console.warn(`LLM PRIMARY (${primary}) Fehler (Versuch ${attempt}/${LLM_RETRIES}):`, e1?.message || e1);
 
       if (attempt === LLM_RETRIES) {
-        // letzter Versuch mit Fallback
+        // letzter Versuch -> Fallback
         try {
-          const controller2 = new AbortController();
-          const to2 = setTimeout(() => controller2.abort(), LLM_TIMEOUT_MS);
-          const txt = await callModel(fallback, controller2.signal);
+          const c2 = new AbortController();
+          const to2 = setTimeout(() => c2.abort(), LLM_TIMEOUT_MS);
+          const txt = await callModel(fallback, c2.signal);
           clearTimeout(to2);
           return txt;
         } catch (e2) {
           const msg2 = e2?.response?.data?.error?.message || e2?.message || String(e2);
-          throw new Error(`Assistent vorübergehend ausgelastet. (${msg2})`);
+          return "Ich bin mir gerade unsicher oder der Dienst ist ausgelastet. Magst du es anders formulieren – oder ich sende dir den passenden Link?";
         }
       }
 
-      if (!retryable) throw new Error(e1?.message || "LLM-Fehler");
-      await new Promise(r => setTimeout(r, attempt * 500)); // einfacher Backoff
+      if (!retryable) {
+        // nicht-retrybarer Fehler -> höflicher Hinweis statt „Okay.“
+        return "Das konnte ich gerade nicht sicher beantworten. Ich kann dir aber einen Link schicken oder es erneut versuchen.";
+      }
+
+      // Backoff vor erneutem Versuch
+      await new Promise(r => setTimeout(r, attempt * 500));
     }
   }
-  return "Okay.";
+
+  // Fallback falls Schleife verlassen wird
+  return "Kurzzeitig überlastet – bitte nochmal senden.";
 }
 
 // =============================
@@ -409,9 +403,10 @@ app.post("/chat", async (req, res) => {
     const threadId = crypto.randomBytes(4).toString("hex");
     const cleanHistory = sanitizeHistory(history);
 
-    // 0) FAQ: Sofort-Antwort ohne LLM (super-schnell & stabil)
+    // 0) FAQ: Sofort-Antwort ohne LLM
     const faq = matchFAQ(message);
     if (faq) {
+      // Mail-Benachrichtigung best effort (asynchron)
       (async () => {
         try {
           const subject = `[Sukhothai Bot] FAQ #${threadId}`;
@@ -430,6 +425,7 @@ app.post("/chat", async (req, res) => {
           console.error("Mailfehler FAQ:", err?.message);
         }
       })();
+
       return res.json({ ok: true, answer: faq, threadId });
     }
 
